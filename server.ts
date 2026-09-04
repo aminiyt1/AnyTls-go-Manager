@@ -470,7 +470,19 @@ const activeTokens = new Set<string>();
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const initialData = loadData();
+
+  const isStandaloneEnv =
+    initialData.isStandalone === true ||
+    process.env.STANDALONE_PANEL === 'true' ||
+    process.env.VITE_STANDALONE === 'true' ||
+    fs.existsSync('/etc/systemd/system/anytls-panel.service');
+
+  // In standalone deployment on Ubuntu/VPS, listen on configured panelPort or process.env.PORT
+  // In development / cloud container, port MUST be 3000 as strictly mandated by ingress proxy
+  const PORT = isStandaloneEnv
+    ? (Number(initialData.panelPort) || Number(process.env.PORT) || 3000)
+    : 3000;
 
   app.use(express.json());
 
@@ -530,7 +542,29 @@ async function startServer() {
     }
 
     const calculatedHash = hashPassword(password, data.admin.salt);
-    if (calculatedHash !== data.admin.passwordHash) {
+    let isAuthenticated = calculatedHash === data.admin.passwordHash;
+
+    // Backward-compatibility fallback: if hash was created with sha256 or plain text
+    if (!isAuthenticated && data.admin.salt) {
+      const sha256Hash = crypto.createHash('sha256').update(password + data.admin.salt).digest('hex');
+      if (sha256Hash === data.admin.passwordHash) {
+        isAuthenticated = true;
+        // Automatically upgrade to PBKDF2 sha512
+        data.admin.passwordHash = calculatedHash;
+        saveData(data);
+      }
+    }
+
+    if (!isAuthenticated && (data.admin as any).password === password) {
+      isAuthenticated = true;
+      delete (data.admin as any).password;
+      const newSalt = crypto.randomBytes(16).toString('hex');
+      data.admin.salt = newSalt;
+      data.admin.passwordHash = hashPassword(password, newSalt);
+      saveData(data);
+    }
+
+    if (!isAuthenticated) {
       res.status(401).json({ error: 'Invalid username or password' });
       return;
     }
@@ -560,6 +594,7 @@ async function startServer() {
     res.json({
       isLoggedIn: true,
       username: data.admin.username,
+      panelPort: data.panelPort || 3000,
     });
   });
 
@@ -576,7 +611,14 @@ async function startServer() {
 
     const data = loadData();
     const currentHash = hashPassword(currentPassword, data.admin.salt);
-    if (currentHash !== data.admin.passwordHash) {
+    let isAuthed = currentHash === data.admin.passwordHash;
+    if (!isAuthed && data.admin.salt) {
+      const sha256Hash = crypto.createHash('sha256').update(currentPassword + data.admin.salt).digest('hex');
+      if (sha256Hash === data.admin.passwordHash) {
+        isAuthed = true;
+      }
+    }
+    if (!isAuthed) {
       res.status(400).json({ error: 'Incorrect current password' });
       return;
     }
@@ -587,6 +629,98 @@ async function startServer() {
     saveData(data);
 
     res.json({ success: true, message: 'Password changed successfully' });
+  });
+
+  // Settings update endpoint (changes password and/or panel port)
+  app.post('/api/settings/update', requireAuth, (req: Request, res: Response) => {
+    const { currentPassword, newPassword, newPort } = req.body;
+    const data = loadData();
+
+    if (!currentPassword) {
+      res.status(400).json({ error: 'Current password is required to save changes' });
+      return;
+    }
+
+    const currentHash = hashPassword(currentPassword, data.admin.salt);
+    let isAuthed = currentHash === data.admin.passwordHash;
+    if (!isAuthed && data.admin.salt) {
+      const sha256Hash = crypto.createHash('sha256').update(currentPassword + data.admin.salt).digest('hex');
+      if (sha256Hash === data.admin.passwordHash) {
+        isAuthed = true;
+      }
+    }
+    if (!isAuthed) {
+      res.status(400).json({ error: 'Incorrect current password' });
+      return;
+    }
+
+    let passwordChanged = false;
+    if (newPassword && newPassword.trim() !== '') {
+      if (newPassword.length < 6) {
+        res.status(400).json({ error: 'New password must be at least 6 characters' });
+        return;
+      }
+      const newSalt = crypto.randomBytes(16).toString('hex');
+      data.admin.salt = newSalt;
+      data.admin.passwordHash = hashPassword(newPassword, newSalt);
+      passwordChanged = true;
+    }
+
+    let portChanged = false;
+    let targetPort = data.panelPort || 3000;
+    if (newPort !== undefined && newPort !== null && newPort !== '') {
+      const parsedPort = parseInt(String(newPort), 10);
+      if (isNaN(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+        res.status(400).json({ error: 'Panel port must be a number between 1 and 65535' });
+        return;
+      }
+      const collision = data.configs.find((c) => c.port === parsedPort);
+      if (collision) {
+        res.status(400).json({ error: `Port ${parsedPort} is already assigned to AnyTLS tunnel '${collision.remark}'` });
+        return;
+      }
+      if (parsedPort !== data.panelPort) {
+        data.panelPort = parsedPort;
+        targetPort = parsedPort;
+        portChanged = true;
+      }
+    }
+
+    saveData(data);
+
+    // If port changed on standalone linux system, update systemd and ufw
+    if (portChanged && os.platform() === 'linux') {
+      try {
+        const servicePath = '/etc/systemd/system/anytls-panel.service';
+        if (fs.existsSync(servicePath)) {
+          let serviceContent = fs.readFileSync(servicePath, 'utf8');
+          if (serviceContent.includes('Environment=PORT=')) {
+            serviceContent = serviceContent.replace(/Environment=PORT=\d+/, `Environment=PORT=${targetPort}`);
+          } else {
+            serviceContent = serviceContent.replace(/\[Service\]/, `[Service]\nEnvironment=PORT=${targetPort}`);
+          }
+          fs.writeFileSync(servicePath, serviceContent, 'utf8');
+          exec(`systemctl daemon-reload && ufw allow ${targetPort}/tcp >/dev/null 2>&1 || true`, () => {});
+        }
+      } catch (err) {
+        console.error('Error updating systemd service port:', err);
+      }
+
+      // Schedule graceful restart so new port takes effect
+      setTimeout(() => {
+        process.exit(0);
+      }, 1200);
+    }
+
+    res.json({
+      success: true,
+      passwordChanged,
+      portChanged,
+      newPort: targetPort,
+      message: portChanged
+        ? `Settings saved! Port updated to ${targetPort}. The panel service is restarting on the new port.`
+        : 'Settings saved successfully.',
+    });
   });
 
   app.post('/api/auth/logout', (req: Request, res: Response) => {
@@ -999,6 +1133,7 @@ async function startServer() {
       'server.ts',
       'metadata.json',
       '.env.example',
+      '.gitignore',
     ];
 
     for (const file of filesToInclude) {
