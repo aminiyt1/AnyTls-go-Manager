@@ -9,6 +9,14 @@ set -e
 # Capture script directory and caller directory immediately before any cd
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 CALLER_DIR="$(pwd)"
+GITHUB_REPO="${1:-${GITHUB_REPO:-}}"
+if [ -z "$GITHUB_REPO" ]; then
+    if git -C "$SCRIPT_DIR" remote get-url origin &>/dev/null; then
+        GITHUB_REPO=$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null | sed -E 's/.*github\.com[:\/](.*)\.git/\1/' || true)
+    elif git -C "$CALLER_DIR" remote get-url origin &>/dev/null; then
+        GITHUB_REPO=$(git -C "$CALLER_DIR" remote get-url origin 2>/dev/null | sed -E 's/.*github\.com[:\/](.*)\.git/\1/' || true)
+    fi
+fi
 
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
@@ -176,20 +184,40 @@ if [ ! -f "$INSTALL_DIR/package.json" ]; then
     fi
 fi
 
-# Fallback 2: Automatic download from official release URL if package.json is still missing
+# Fallback 2: If GITHUB_REPO is specified (e.g. GITHUB_REPO="user/repo" or passed as $1), clone directly
+if [ ! -f "$INSTALL_DIR/package.json" ] && [ -n "$GITHUB_REPO" ]; then
+    CLEAN_REPO=$(echo "$GITHUB_REPO" | sed -E 's#^https?://github.com/##' | sed -E 's#\.git$##')
+    echo -e "${YELLOW}Cloning panel from GitHub repository: https://github.com/${CLEAN_REPO}...${NC}"
+    rm -rf /tmp/anytls-repo
+    if git clone --depth 1 "https://github.com/${CLEAN_REPO}.git" /tmp/anytls-repo; then
+        cp -r /tmp/anytls-repo/* "$INSTALL_DIR/" 2>/dev/null || true
+        cp /tmp/anytls-repo/.env* "$INSTALL_DIR/" 2>/dev/null || true
+        rm -rf /tmp/anytls-repo
+        echo -e "${GREEN}✓ Cloned from GitHub into ${INSTALL_DIR}${NC}"
+    fi
+fi
+
+# Fallback 3: Prompt user for GitHub repository if package.json is still missing
 if [ ! -f "$INSTALL_DIR/package.json" ]; then
-    PANEL_ZIP_URL="https://ais-dev-5ym5y2hecbbnt73jaj562d-667232856800.us-east1.run.app/api/download-zip"
-    echo -e "${YELLOW}Downloading complete AnyTLS Panel package from cloud source...${NC}"
-    if curl -fsSL "$PANEL_ZIP_URL" -o /tmp/anytls-fresh.zip; then
-        unzip -q -o /tmp/anytls-fresh.zip -d "$INSTALL_DIR"
-        rm -f /tmp/anytls-fresh.zip
-        echo -e "${GREEN}✓ Downloaded and extracted panel source into ${INSTALL_DIR}${NC}"
+    echo ""
+    echo -e "${YELLOW}⚠️  Panel files not found in ${INSTALL_DIR}.${NC}"
+    echo -e "Please enter your GitHub repository (e.g. ${CYAN}username/anytls-panel${NC}):"
+    read -p "GitHub Repository: " USER_INPUT_REPO
+    if [ -n "$USER_INPUT_REPO" ]; then
+        CLEAN_USER_REPO=$(echo "$USER_INPUT_REPO" | sed -E 's#^https?://github.com/##' | sed -E 's#\.git$##')
+        rm -rf /tmp/anytls-repo
+        if git clone --depth 1 "https://github.com/${CLEAN_USER_REPO}.git" /tmp/anytls-repo; then
+            cp -r /tmp/anytls-repo/* "$INSTALL_DIR/" 2>/dev/null || true
+            cp /tmp/anytls-repo/.env* "$INSTALL_DIR/" 2>/dev/null || true
+            rm -rf /tmp/anytls-repo
+            echo -e "${GREEN}✓ Cloned repository successfully into ${INSTALL_DIR}!${NC}"
+        fi
     fi
 fi
 
 if [ ! -f "$INSTALL_DIR/package.json" ]; then
     echo -e "${RED}[Error] package.json could not be prepared in $INSTALL_DIR!${NC}"
-    echo "Please check internet connection to download the panel package."
+    echo "Please ensure you have uploaded the project files to your GitHub repository."
     exit 1
 fi
 
@@ -212,6 +240,21 @@ cat > "$CONFIG_FILE" <<EOF
   "configs": []
 }
 EOF
+else
+# If config.json already exists, ensure panelPort and serverIp match user inputs
+node -e '
+const fs = require("fs");
+const file = process.argv[1];
+const port = parseInt(process.argv[2], 10);
+const ip = process.argv[3];
+if (fs.existsSync(file)) {
+  const data = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (port > 0) data.panelPort = port;
+  if (ip) data.serverIp = ip;
+  data.isStandalone = true;
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
+}
+' "$CONFIG_FILE" "$PANEL_PORT" "$SERVER_IP"
 fi
 
 # Ensure standalone environment variables before build
