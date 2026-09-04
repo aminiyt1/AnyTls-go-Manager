@@ -82,6 +82,17 @@ export const api = {
     });
   },
 
+  async updateSettings(payload: {
+    currentPassword?: string;
+    newPassword?: string;
+    newPort?: number;
+  }): Promise<{ success: boolean; message: string; portChanged?: boolean; newPort?: number }> {
+    return apiRequest<{ success: boolean; message: string; portChanged?: boolean; newPort?: number }>('/api/settings/update', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   async getConfigs(): Promise<{ configs: AnyTlsConfig[]; serverIp: string }> {
     return apiRequest<{ configs: AnyTlsConfig[]; serverIp: string }>('/api/configs');
   },
