@@ -11,7 +11,11 @@ Easily deploy and manage AnyTLS servers on Ubuntu (22.04 LTS & 24.04 LTS) with f
 Run as root on your Ubuntu server:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/anytls/anytls-panel/main/install.sh | bash
+bash <(curl -fsSL https://raw.githubusercontent.com/aminiyt1/AnyTls-go-Manager/main/install.sh)
+```
+
+```bash
+git clone https://github.com/aminiyt1/AnyTls-go-Manager.git /opt/anytls-panel && cd /opt/anytls-panel && chmod +x install.sh bin/anytls && ./install.sh
 ```
 
 Or extract the downloaded `anytls-panel-ubuntu.zip` and run `./install.sh`.
