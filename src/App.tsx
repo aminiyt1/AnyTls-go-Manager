@@ -460,7 +460,14 @@ export default function App() {
 
       <ChangePasswordModal
         isOpen={isChangePasswordOpen}
+        currentPort={serverStatus?.panelPort || 3000}
+        serverIp={serverIp || serverStatus?.serverIp || ''}
+        isStandalone={isStandalone}
         onClose={() => setIsChangePasswordOpen(false)}
+        onSuccess={() => {
+          fetchData();
+          showToast('Panel settings updated');
+        }}
       />
 
       {/* Delete Confirmation Modal */}
