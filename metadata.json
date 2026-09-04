@@ -1,0 +1,6 @@
+{
+  "name": "AnyTLS Manager Panel",
+  "description": "Modern AnyTLS server management panel with configuration creator, traffic and expiration limits, QR code sharing, and one-click deployment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

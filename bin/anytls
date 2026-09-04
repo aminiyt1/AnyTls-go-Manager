@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# AnyTLS Manager CLI - Terminal Management Utility
+# Usage: anytls
+# ==============================================================================
+
+set -e
+
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+PANEL_DIR="/opt/anytls-panel"
+CONFIG_FILE="${PANEL_DIR}/data/config.json"
+SERVICE_NAME="anytls-panel"
+
+# Check root privilege
+if [ "$(id -u)" != "0" ]; then
+    echo -e "${RED}[Error] Please run this command as root (e.g. sudo anytls)${NC}"
+    exit 1
+fi
+
+get_server_ip() {
+    local ip
+    if [ -f "$CONFIG_FILE" ]; then
+        ip=$(grep -o '"serverIp": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
+    fi
+    if [ -z "$ip" ] || [ "$ip" = "127.0.0.1" ]; then
+        ip=$(curl -s -4 https://api.ipify.org 2>/dev/null || curl -s -4 https://icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
+    fi
+    echo "${ip:-127.0.0.1}"
+}
+
+get_panel_port() {
+    local port
+    if [ -f "$CONFIG_FILE" ]; then
+        port=$(grep -o '"panelPort": *[0-9]*' "$CONFIG_FILE" | awk '{print $2}')
+    fi
+    echo "${port:-3000}"
+}
+
+show_header() {
+    clear
+    echo -e "${CYAN}${BOLD}"
+    echo "  ╔═══════════════════════════════════════════════════════════════╗"
+    echo "  ║                🚀 AnyTLS Management Console                   ║"
+    echo "  ║          Fast, Resilient AnyTLS Web Panel & Tunnels           ║"
+    echo "  ╚═══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+show_status() {
+    show_header
+    local ip=$(get_server_ip)
+    local port=$(get_panel_port)
+    local is_active=$(systemctl is-active ${SERVICE_NAME} 2>/dev/null || echo "inactive")
+
+    echo -e "${BOLD}📌 System Information:${NC}"
+    echo -e " • Service Status   : $([ "$is_active" = "active" ] && echo -e "${GREEN}● Active (Running)${NC}" || echo -e "${RED}● Inactive (Stopped)${NC}")"
+    echo -e " • Web Panel URL    : ${CYAN}http://${ip}:${port}${NC}"
+    echo -e " • Panel Directory  : ${PANEL_DIR}"
+    echo -e " • Binary Path      : $(which anytls-server 2>/dev/null || echo -e "${YELLOW}Not in PATH${NC}")"
+
+    if [ -f "$CONFIG_FILE" ]; then
+        local user=$(grep -o '"username": *"[^"]*"' "$CONFIG_FILE" | head -n 1 | cut -d'"' -f4)
+        local cfg_count=$(grep -o '"id":' "$CONFIG_FILE" 2>/dev/null | wc -l || echo "0")
+        echo -e " • Admin Username   : ${YELLOW}${user:-admin}${NC}"
+        echo -e " • Total Configs    : ${BOLD}${cfg_count}${NC}"
+    fi
+
+    echo ""
+    echo -e "${BOLD}🔍 Active AnyTLS Tunnels & Listening Ports:${NC}"
+    echo -e "${DIM}---------------------------------------------------------------${NC}"
+    local listening=$(ss -lntp 2>/dev/null | grep -E "anytls|${port}" || true)
+    if [ -n "$listening" ]; then
+        echo -e "${GREEN}${listening}${NC}"
+    else
+        echo -e "${YELLOW}No active AnyTLS sockets currently in LISTEN mode.${NC}"
+    fi
+    echo -e "${DIM}---------------------------------------------------------------${NC}"
+
+    echo ""
+    echo -e "${BOLD}⚙️  Running Processes:${NC}"
+    ps aux 2>/dev/null | grep -E "anytls-server|dist/server.cjs" | grep -v grep || echo -e "${YELLOW}No AnyTLS processes running.${NC}"
+    echo ""
+    read -p "Press Enter to return to menu..."
+}
+
+restart_panel() {
+    echo ""
+    echo -e "${CYAN}🔄 Restarting AnyTLS Panel and re-syncing all tunnel processes...${NC}"
+    systemctl restart ${SERVICE_NAME}
+    sleep 2
+    if systemctl is-active --quiet ${SERVICE_NAME}; then
+        echo -e "${GREEN}✓ Panel restarted successfully!${NC}"
+        local port=$(get_panel_port)
+        local ip=$(get_server_ip)
+        echo -e "🌐 Accessible at: ${CYAN}http://${ip}:${port}${NC}"
+    else
+        echo -e "${RED}⚠️ Failed to start service. Checking logs...${NC}"
+        journalctl -u ${SERVICE_NAME} -n 15 --no-pager
+    fi
+    echo ""
+    read -p "Press Enter to return to menu..."
+}
+
+stop_panel() {
+    echo ""
+    echo -e "${YELLOW}🛑 Stopping AnyTLS Panel and terminating all active tunnels...${NC}"
+    systemctl stop ${SERVICE_NAME} || true
+    pkill -9 anytls-server 2>/dev/null || true
+    echo -e "${GREEN}✓ Panel and all AnyTLS processes stopped.${NC}"
+    echo ""
+    read -p "Press Enter to return to menu..."
+}
+
+start_panel() {
+    echo ""
+    echo -e "${CYAN}▶️  Starting AnyTLS Panel...${NC}"
+    systemctl start ${SERVICE_NAME}
+    sleep 2
+    if systemctl is-active --quiet ${SERVICE_NAME}; then
+        echo -e "${GREEN}✓ Panel is now running!${NC}"
+        local port=$(get_panel_port)
+        local ip=$(get_server_ip)
+        echo -e "🌐 Accessible at: ${CYAN}http://${ip}:${port}${NC}"
+    else
+        echo -e "${RED}⚠️ Failed to start. Check logs for details.${NC}"
+    fi
+    echo ""
+    read -p "Press Enter to return to menu..."
+}
+
+view_logs() {
+    echo ""
+    echo -e "${CYAN}📋 Showing live AnyTLS Panel and process logs (Press Ctrl+C to exit)...${NC}"
+    sleep 1
+    journalctl -u ${SERVICE_NAME} -f -n 50
+}
+
+change_credentials() {
+    show_header
+    echo -e "${BOLD}🔑 Change Admin Password or Panel Port${NC}"
+    echo -e "${DIM}---------------------------------------------------------------${NC}"
+    local port=$(get_panel_port)
+    echo -e "Current Panel Port: ${YELLOW}${port}${NC}"
+    read -p "Enter new Panel Port (leave empty to keep ${port}): " NEW_PORT
+    NEW_PORT=${NEW_PORT:-$port}
+
+    read -p "Enter new Admin Password (leave empty to keep current): " NEW_PASS
+
+    if [ -n "$NEW_PASS" ] || [ "$NEW_PORT" != "$port" ]; then
+        cd "${PANEL_DIR}"
+        node -e '
+        const fs = require("fs");
+        const crypto = require("crypto");
+        const file = "'${CONFIG_FILE}'";
+        if (fs.existsSync(file)) {
+            const data = JSON.parse(fs.readFileSync(file, "utf8"));
+            const newPort = parseInt("'${NEW_PORT}'", 10);
+            const newPass = "'${NEW_PASS}'";
+            if (newPort > 0) {
+                data.panelPort = newPort;
+            }
+            if (newPass) {
+                const salt = crypto.randomBytes(16).toString("hex");
+                const hash = crypto.createHash("sha256").update(newPass + salt).digest("hex");
+                data.admin.passwordHash = hash;
+                data.admin.salt = salt;
+                delete data.admin.password;
+            }
+            fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
+            console.log("Credentials updated successfully in config.json");
+        } else {
+            console.error("Config file not found!");
+            process.exit(1);
+        }
+        '
+        if [ "$NEW_PORT" != "$port" ]; then
+            if command -v ufw &>/dev/null; then
+                ufw allow ${NEW_PORT}/tcp >/dev/null 2>&1 || true
+            fi
+        fi
+        echo -e "${GREEN}✓ Changes saved! Restarting panel to apply...${NC}"
+        systemctl restart ${SERVICE_NAME}
+        sleep 2
+        echo -e "${GREEN}✓ Panel updated! New URL: http://$(get_server_ip):${NEW_PORT}${NC}"
+    else
+        echo "No changes made."
+    fi
+    echo ""
+    read -p "Press Enter to return to menu..."
+}
+
+update_panel() {
+    show_header
+    echo -e "${CYAN}🚀 Updating AnyTLS Panel to the latest release...${NC}"
+    local UPDATE_URL="https://ais-dev-5ym5y2hecbbnt73jaj562d-667232856800.us-east1.run.app/api/download-zip"
+
+    echo "Downloading package from: ${UPDATE_URL}..."
+    if curl -fsSL "$UPDATE_URL" -o /tmp/anytls-latest.zip; then
+        echo "Extracting updated source into ${PANEL_DIR}..."
+        unzip -q -o /tmp/anytls-latest.zip -d "${PANEL_DIR}"
+        rm -f /tmp/anytls-latest.zip
+
+        # Refresh CLI tool
+        if [ -f "${PANEL_DIR}/bin/anytls" ]; then
+            cp "${PANEL_DIR}/bin/anytls" /usr/local/bin/anytls
+            chmod +x /usr/local/bin/anytls
+        fi
+
+        echo "Compiling latest production build..."
+        cd "${PANEL_DIR}"
+        npm run build
+
+        echo "Restarting service..."
+        systemctl restart ${SERVICE_NAME}
+        sleep 2
+        echo -e "${GREEN}✓ AnyTLS Panel updated successfully!${NC}"
+    else
+        echo -e "${RED}⚠️ Failed to download update package. Please check network connectivity.${NC}"
+    fi
+    echo ""
+    read -p "Press Enter to return to menu..."
+}
+
+uninstall_panel() {
+    show_header
+    echo -e "${RED}${BOLD}⚠️  WARNING: UNINSTALL ANYTLS PANEL & ALL TUNNELS${NC}"
+    echo -e "This will permanently:"
+    echo -e " 1. Stop and disable the anytls-panel systemd service"
+    echo -e " 2. Terminate all active anytls-server processes"
+    echo -e " 3. Delete the panel directory: ${PANEL_DIR}"
+    echo -e " 4. Remove /usr/local/bin/anytls-server, /usr/local/bin/anytls-client and /usr/local/bin/anytls"
+    echo ""
+    read -p "Are you ABSOLUTELY sure you want to uninstall? (type 'yes' to confirm): " CONFIRM
+
+    if [ "$CONFIRM" = "yes" ] || [ "$CONFIRM" = "YES" ]; then
+        echo ""
+        echo -e "${CYAN}Stopping and disabling service...${NC}"
+        systemctl stop ${SERVICE_NAME} 2>/dev/null || true
+        systemctl disable ${SERVICE_NAME} 2>/dev/null || true
+        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        systemctl daemon-reload
+
+        echo -e "${CYAN}Terminating any lingering AnyTLS processes...${NC}"
+        pkill -9 anytls-server 2>/dev/null || true
+
+        echo -e "${CYAN}Removing panel files and binaries...${NC}"
+        rm -rf "${PANEL_DIR}"
+        rm -f /usr/local/bin/anytls-server /usr/local/bin/anytls-client /usr/local/bin/anytls
+
+        echo -e "${GREEN}${BOLD}================================================================${NC}"
+        echo -e "${GREEN}${BOLD}  ✓ AnyTLS Panel and all related binaries uninstalled cleanly.  ${NC}"
+        echo -e "${GREEN}${BOLD}================================================================${NC}"
+        exit 0
+    else
+        echo -e "${YELLOW}Uninstall cancelled.${NC}"
+        sleep 1
+    fi
+}
+
+main_menu() {
+    while true; do
+        show_header
+        local ip=$(get_server_ip)
+        local port=$(get_panel_port)
+        local is_active=$(systemctl is-active ${SERVICE_NAME} 2>/dev/null || echo "inactive")
+
+        echo -e " Panel URL: ${CYAN}http://${ip}:${port}${NC} | Status: $([ "$is_active" = "active" ] && echo -e "${GREEN}Running${NC}" || echo -e "${RED}Stopped${NC}")"
+        echo -e "${DIM}─────────────────────────────────────────────────────────────────${NC}"
+        echo -e "  ${BOLD}[1]${NC} 🔍 Status & Live AnyTLS Port Monitoring"
+        echo -e "  ${BOLD}[2]${NC} 🔄 Restart Panel & Re-sync All AnyTLS Processes"
+        echo -e "  ${BOLD}[3]${NC} 🛑 Stop Panel & All AnyTLS Processes"
+        echo -e "  ${BOLD}[4]${NC} ▶️  Start Panel"
+        echo -e "  ${BOLD}[5]${NC} 📋 View Live Logs (Panel & AnyTLS Tunnels)"
+        echo -e "  ${BOLD}[6]${NC} 🔑 View / Change Admin Password & Port"
+        echo -e "  ${BOLD}[7]${NC} 🚀 Update Panel to Latest Version"
+        echo -e "  ${BOLD}[8]${NC} 🗑️  Uninstall / Completely Remove AnyTLS & Panel"
+        echo -e "  ${BOLD}[0]${NC} 🚪 Exit"
+        echo -e "${DIM}─────────────────────────────────────────────────────────────────${NC}"
+        read -p "Select an option [0-8]: " choice
+
+        case "$choice" in
+            1) show_status ;;
+            2) restart_panel ;;
+            3) stop_panel ;;
+            4) start_panel ;;
+            5) view_logs ;;
+            6) change_credentials ;;
+            7) update_panel ;;
+            8) uninstall_panel ;;
+            0) clear; exit 0 ;;
+            *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+main_menu
