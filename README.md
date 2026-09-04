@@ -13,7 +13,7 @@ Run as root on your Ubuntu server:
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/aminiyt1/AnyTls-go-Manager/main/install.sh)
 ```
-
+##or :
 ```bash
 git clone https://github.com/aminiyt1/AnyTls-go-Manager.git /opt/anytls-panel && cd /opt/anytls-panel && chmod +x install.sh bin/anytls && ./install.sh
 ```
